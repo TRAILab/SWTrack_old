@@ -3,7 +3,7 @@ import copy
 import copy 
 import importlib
 import sys 
-
+from swtracker import SWTracker
 import numpy as np
 
 def greedy_assignment(dist):
@@ -25,7 +25,8 @@ WAYMO_TRACKING_NAMES = [
 ]
 
 class PubTracker(object):
-  def __init__(self, max_age=0, max_dist={}, score_thresh=0.1):
+  def __init__(self, swtrack=True, max_age=0, max_dist={}, score_thresh=0.1, work_dir=None):
+    self.swtrack = swtrack
     self.max_age = max_age
 
     self.WAYMO_CLS_VELOCITY_ERROR = max_dist 
@@ -33,11 +34,16 @@ class PubTracker(object):
     self.WAYMO_TRACKING_NAMES = WAYMO_TRACKING_NAMES
     self.score_thresh = score_thresh 
 
+    if self.swtrack:
+        self.swtracker = SWTracker(work_dir)
+        print('Initialized swtrcker.')
     self.reset()
   
   def reset(self):
     self.id_count = 0
     self.tracks = []
+    if self.swtrack:
+        self.swtracker.reset()
 
   def step_centertrack(self, results, time_lag):
     if len(results) == 0:
@@ -55,12 +61,15 @@ class PubTracker(object):
         det['tracking'] = np.array(det['velocity'][:2]) * -1 *  time_lag
         det['label_preds'] = self.WAYMO_TRACKING_NAMES.index(det['detection_name'])
         temp.append(det)
-
+        # breakpoint()
       results = temp
+	
+    if len(results) == 0:
+      raise ValueError('Unexpected results length') # TODO: implement if needed
 
     N = len(results)
     M = len(self.tracks)
-
+    # breakpoint()
     # N X 2 
     if 'tracking' in results[0]:
       dets = np.array(
@@ -77,10 +86,13 @@ class PubTracker(object):
 
     tracks = np.array(
       [pre_det['ct'] for pre_det in self.tracks], np.float32) # M x 2
+    # breakpoint()
+
 
     if len(tracks) > 0:  # NOT FIRST FRAME
       dist = (((tracks.reshape(1, -1, 2) - \
                 dets.reshape(-1, 1, 2)) ** 2).sum(axis=2))  # N x M
+    #   breakpoint()
       dist = np.sqrt(dist) # absolute distance in meter
 
       invalid = ((dist > max_diff.reshape(N, 1)) + \
@@ -88,9 +100,19 @@ class PubTracker(object):
 
       dist = dist  + invalid * 1e18
       matched_indices = greedy_assignment(copy.deepcopy(dist))
+      if self.swtrack:
+        matched_indices_debug = matched_indices
+        # breakpoint()
+        matched_indices = self.swtracker.assignment(
+          copy.deepcopy(results), copy.deepcopy(self.tracks), 
+          time_lag)
+        matches_dist = [dist[m[0], m[1]] for m in matched_indices]
     else:  # first few frame
       assert M == 0
       matched_indices = np.array([], np.int32).reshape(-1, 2)
+      if self.swtrack:
+       self.swtracker.append_detections(copy.deepcopy(results), time_lag)
+
 
     unmatched_dets = [d for d in range(dets.shape[0]) \
       if not (d in matched_indices[:, 0])]
@@ -106,6 +128,10 @@ class PubTracker(object):
       track['tracking_id'] = self.tracks[m[1]]['tracking_id']      
       track['age'] = 1
       track['active'] = self.tracks[m[1]]['active'] + 1
+      track['detection_ids'] = self.tracks[m[1]]['detection_ids']
+      track['detection_ids'].append(m[0])
+      track['translation_history'] = self.tracks[m[1]]['translation_history']
+      track['translation_history'].append(track['translation'])
       ret.append(track)
 
     for i in unmatched_dets:
@@ -115,6 +141,8 @@ class PubTracker(object):
         track['tracking_id'] = self.id_count
         track['age'] = 1
         track['active'] =  1
+        track['detection_ids'] = [i]
+        track['translation_history'] = [track['translation']]
         ret.append(track)
 
     # still store unmatched tracks if its age doesn't exceed max_age, however, we shouldn't output 
@@ -124,6 +152,7 @@ class PubTracker(object):
       if track['age'] < self.max_age:
         track['age'] += 1
         track['active'] = 0
+        track['detection_ids'].append(-1)
         ct = track['ct']
 
         # movement in the last second

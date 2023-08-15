@@ -109,7 +109,6 @@ def main():
         last_time_stamp = pred['timestamp']
 
         current_det = pred['global_boxs']
-
         outputs = tracker.step_centertrack(current_det, time_lag)
         tracking_ids = []
         box_ids = [] 
