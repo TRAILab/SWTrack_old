@@ -21,6 +21,7 @@ from nuscenes.utils.geometry_utils import transform_matrix
 import pickle 
 from pyquaternion import Quaternion
 from det3d.datasets.waymo.waymo_common import _create_pd_detection
+from waymo_render import *
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Tracking Evaluation")
@@ -42,6 +43,7 @@ def parse_args():
     return args
 
 def get_obj(path):
+    path = path.replace('waymo', 'Waymo')
     with open(path, 'rb') as f:
             obj = pickle.load(f)
     return obj 
@@ -50,7 +52,6 @@ def veh_pos_to_transform(veh_pos):
     "convert vehicle pose to two transformation matrix"
     rotation = veh_pos[:3, :3] 
     tran = veh_pos[:3, 3]
-
     global_from_car = transform_matrix(
         tran, Quaternion(matrix=rotation), inverse=False
     )
@@ -79,8 +80,8 @@ def main():
         'PEDESTRIAN': args.pedestrian,
         'CYCLIST': args.cyclist
     }
-
-    tracker = Tracker(max_age=args.max_age, max_dist=max_dist, score_thresh=args.score_thresh)
+    # breakpoint()
+    tracker = Tracker(swtrack=True, max_age=args.max_age, max_dist=max_dist, score_thresh=args.score_thresh, work_dir='/home/robert/Desktop/trail/CenterPoint/sw_waymo_results')
 
     with open(args.checkpoint, 'rb') as f:
         predictions=pickle.load(f)
@@ -93,13 +94,13 @@ def main():
     size = len(global_preds)
 
     print("Begin Tracking {} frames\n".format(size))
-
+    gt = np.load('data/Waymo/gt_preds.pkl', allow_pickle=True)
     predictions = {} 
-
-    for i in tqdm(range(size)):
+    seq_start_idx, seq_end_idx = 0, 0
+    for i in range(size):
         pred = global_preds[i]
         token = pred['token']
-
+        print(f'token is: {token}')
         # reset tracking after one video sequence
         if pred['frame_id'] == 0:
             tracker.reset()
@@ -109,10 +110,14 @@ def main():
         last_time_stamp = pred['timestamp']
 
         current_det = pred['global_boxs']
+        # breakpoint()
+        # (Pdb) cur = current_det[0]
+        # (Pdb) cur
+        # {'translation': array([ 7198.89438924, -1579.89380022,   212.04542284]), 'velocity': array([  1.48318901, -13.92130158]), 'detection_name': 'VEHICLE', 'score': 0.9266272, 'box_id': 0}
         outputs = tracker.step_centertrack(current_det, time_lag)
         tracking_ids = []
         box_ids = [] 
-
+        # breakpoint()
         for item in outputs:
             if item['active'] == 0:
                 continue 
@@ -138,8 +143,20 @@ def main():
 
         # store box score 
         track_result['scores'] = detection['scores'][remained_box_ids]
-
-        predictions[token] = track_result 
+        track_result['pose'] = detection_results['pose']
+        # track_result['original_box3d'] = detection_results['original_box3d']
+        predictions[token] = track_result
+        ### loading gt
+        last_frame = False
+        if i == size-1:
+            last_frame = True
+            seq_end_idx = i+1
+        elif global_preds[i+1]['frame_id'] - global_preds[i]['frame_id'] != 1 or i in [x for x in range(200)]:
+            seq_end_idx = i+1
+            last_frame = True
+        # breakpoint()
+        render_boxes('waymo_render/', args.info_path, predictions, token, pred['frame_id'], last_frame, seq_start_idx, seq_end_idx, gt)
+        # seq_start_idx = seq_end_idx
 
     os.makedirs(args.work_dir, exist_ok=True)
     # save prediction files to args.work_dir 
@@ -154,7 +171,8 @@ def main():
            {}  {} ".format(result_path, gt_path))
     
     # os.system("waymo_open_dataset/metrics/tools/compute_tracking_metrics_main \
-    #       {}  {} ".format(result_path, gt_path))
+    #       {}  {} ".format(result_path, gt_path))    
+    
 
 def transform_box(box, pose):
     """Transforms 3d upright boxes from one frame to another.
@@ -165,6 +183,7 @@ def transform_box(box, pose):
     Returns:
     Transformed boxes of shape [..., N, 7] with the same type as box.
     """
+    # breakpoint()
     transform = pose 
     heading = box[..., -1] + np.arctan2(transform[..., 1, 0], transform[..., 0,
                                                                     0])
@@ -178,7 +197,7 @@ def transform_box(box, pose):
 
     velocity = np.einsum('...ij,...nj->...ni', transform[..., 0:3, 0:3],
                     velocity)[..., [0, 1]] # remove z axis 
-
+    # breakpoint()
     return np.concatenate([center, box[..., 3:6], velocity, heading[..., np.newaxis]], axis=-1)
 
 def label_to_name(label):
@@ -212,25 +231,27 @@ def convert_detection_to_global_box(detections, infos):
     ret_list = [] 
 
     detection_results = {} # copy.deepcopy(detections)
-
+    gt_results = {}
     for token in tqdm(infos.keys()):
         detection = detections[token]
         detection_results[token] = copy.deepcopy(detection)
-
         info = infos[token]
         # pose = get_transform(info)
         anno_path = info['anno_path']
         ref_obj = get_obj(anno_path)
+        # breakpoint()
         pose = np.reshape(ref_obj['veh_to_global'], [4, 4])
-
+        detection_results['pose'] = pose
+        # (Pdb) ref_obj['objects'][0].keys()
+        # dict_keys(['id', 'name', 'label', 'box', 'num_points', 'detection_difficulty_level', 'combined_difficulty_level', 'global_speed', 'global_accel'])
         box3d = detection["box3d_lidar"].detach().clone().cpu().numpy() 
         labels = detection["label_preds"].detach().clone().cpu().numpy()
         scores = detection['scores'].detach().clone().cpu().numpy()
-        box3d[:, -1] = -box3d[:, -1] - np.pi / 2
+        # box3d[:, -1] = -box3d[:, -1] - np.pi / 2
         box3d[:, [3, 4]] = box3d[:, [4, 3]]
 
         box3d = transform_box(box3d, pose)
-
+        # detection_results['original_box3d'] = box3d
         frame_id = token.split('_')[3][:-4]
 
         num_box = len(box3d)
@@ -255,7 +276,6 @@ def convert_detection_to_global_box(detections, infos):
         })
 
     sorted_ret_list = sort_detections(ret_list)
-
     return sorted_ret_list, detection_results 
 
 if __name__ == '__main__':
