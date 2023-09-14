@@ -96,7 +96,7 @@ def main(nusc):
 
     print("Begin Tracking\n")
     start = time.time()
-    for i in range(200, size):
+    for i in range(size):
         token = frames[i]['token']
 
         # reset tracking after one video sequence
