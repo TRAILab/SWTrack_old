@@ -178,7 +178,7 @@ class PubTracker(object):
             track['age'] = 1
             track['t_age'] = 0.0
             track['active'] =  0
-            if (M == 0 and track['detection_score'] > 0.3) or track['detection_score'] > 0.5:
+            if track['detection_score'] > 0.2:
                 track['active'] =  1
             track['detection_ids'] = [i]
             track['translation_history'] = [track['translation']]
