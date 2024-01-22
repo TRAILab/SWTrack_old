@@ -110,7 +110,6 @@ def main(nusc):
         last_time_stamp = frames[i]['timestamp']
 
         preds = predictions[token]
-
         outputs = tracker.step_centertrack(preds, time_lag)
         annos = []
 

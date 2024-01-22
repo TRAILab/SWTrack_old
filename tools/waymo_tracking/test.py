@@ -71,6 +71,35 @@ def reorganize_info(infos):
 
     return new_info 
 
+def transform_point(point, pose_matrix):
+    # Convert the point to homogeneous coordinates
+    point_homogeneous = np.array([point[0].item(), point[1].item(), point[2].item(), 1])
+    
+    # Apply the transformation
+    transformed_point = np.dot(pose_matrix, point_homogeneous)
+    
+    # Convert back to 3D coordinates
+    transformed_point = transformed_point[:3] / transformed_point[3]
+    
+    return transformed_point
+
+def rotation_matrix_to_euler_angles(R):
+    assert(R.shape == (3, 3))
+    
+    sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+    singular = sy < 1e-6
+
+    if not singular:
+        x = math.atan2(R[2,1], R[2,2])
+        y = math.atan2(-R[2,0], sy)
+        z = math.atan2(R[1,0], R[0,0])
+    else:
+        x = math.atan2(-R[1,2], R[1,1])
+        y = math.atan2(-R[2,0], sy)
+        z = 0
+
+    return np.rad2deg([x, y, z])
+
 def main():
     args = parse_args()
     print('Deploy OK')
@@ -80,8 +109,8 @@ def main():
         'PEDESTRIAN': args.pedestrian,
         'CYCLIST': args.cyclist
     }
-    # breakpoint()
-    tracker = Tracker(swtrack=True, max_age=args.max_age, max_dist=max_dist, score_thresh=args.score_thresh, work_dir='/home/robert/Desktop/trail/CenterPoint/sw_waymo_results')
+
+    tracker = Tracker(swtrack=False, max_age=args.max_age, max_dist=max_dist, score_thresh=args.score_thresh, work_dir='/home/robert/Desktop/trail/CenterPoint/sw_waymo_results')
 
     with open(args.checkpoint, 'rb') as f:
         predictions=pickle.load(f)
@@ -97,12 +126,21 @@ def main():
     gt = np.load('data/Waymo/gt_preds.pkl', allow_pickle=True)
     predictions = {} 
     seq_start_idx, seq_end_idx = 0, 0
+    last_frame = True
+    ego_pose_dict = {}
     for i in range(size):
         pred = global_preds[i]
         token = pred['token']
-        print(f'token is: {token}')
-        # reset tracking after one video sequence
+        ego_pose = infos[token]['sweeps'][0]['transform_matrix']
+        assert token not in ego_pose_dict
+        if 'seq_1_' in token:
+            ego_pose_dict[token] = ego_pose if ego_pose is not None else np.eye(4)
+    # breakpoint()
+    for i in range(size):
+        pred = global_preds[i]
+        token = pred['token']
         if pred['frame_id'] == 0:
+            seq_start_idx = seq_end_idx
             tracker.reset()
             last_time_stamp = pred['timestamp']
 
@@ -110,21 +148,14 @@ def main():
         last_time_stamp = pred['timestamp']
 
         current_det = pred['global_boxs']
-        # breakpoint()
-        # (Pdb) cur = current_det[0]
-        # (Pdb) cur
-        # {'translation': array([ 7198.89438924, -1579.89380022,   212.04542284]), 'velocity': array([  1.48318901, -13.92130158]), 'detection_name': 'VEHICLE', 'score': 0.9266272, 'box_id': 0}
         outputs = tracker.step_centertrack(current_det, time_lag)
         tracking_ids = []
         box_ids = [] 
-        # breakpoint()
         for item in outputs:
             if item['active'] == 0:
                 continue 
-            
             box_ids.append(item['box_id'])
             tracking_ids.append(item['tracking_id'])
-
         # now reorder 
         detection = detection_results[token]
 
@@ -144,20 +175,15 @@ def main():
         # store box score 
         track_result['scores'] = detection['scores'][remained_box_ids]
         track_result['pose'] = detection_results['pose']
-        # track_result['original_box3d'] = detection_results['original_box3d']
-        predictions[token] = track_result
-        ### loading gt
-        last_frame = False
-        if i == size-1:
-            last_frame = True
-            seq_end_idx = i+1
-        elif global_preds[i+1]['frame_id'] - global_preds[i]['frame_id'] != 1 or i in [x for x in range(200)]:
-            seq_end_idx = i+1
-            last_frame = True
-        # breakpoint()
-        render_boxes('waymo_render/', args.info_path, predictions, token, pred['frame_id'], last_frame, seq_start_idx, seq_end_idx, gt)
-        # seq_start_idx = seq_end_idx
+        
+        ego_pose = infos[token]['sweeps'][0]['transform_matrix']
 
+        predictions[token] = track_result
+        seq_end_idx = i + 1
+        if global_preds[i+1]['frame_id'] - global_preds[i]['frame_id'] != 1: # used to get the start and end index of each sequence
+            seq_start_idx = seq_end_idx
+        if last_frame and "seq_1_" in token: #and "seq_1_frame_98" in token or "seq_1_frame_20" in token:
+            render_boxes('waymo_occlusion_viz_interp/', args.info_path, predictions, token, pred['frame_id'], last_frame, seq_start_idx, seq_end_idx, gt, infos, i, ego_pose_dict)
     os.makedirs(args.work_dir, exist_ok=True)
     # save prediction files to args.work_dir 
     _create_pd_detection(predictions, infos, args.work_dir, tracking=True)
@@ -170,8 +196,8 @@ def main():
     print("waymo-open-dataset/bazel-bin/waymo_open_dataset/metrics/tools/compute_tracking_metrics_main \
            {}  {} ".format(result_path, gt_path))
     
-    # os.system("waymo_open_dataset/metrics/tools/compute_tracking_metrics_main \
-    #       {}  {} ".format(result_path, gt_path))    
+    os.system("waymo_open_dataset/metrics/tools/compute_tracking_metrics_main \
+          {}  {} ".format(result_path, gt_path))    
     
 
 def transform_box(box, pose):
@@ -183,7 +209,6 @@ def transform_box(box, pose):
     Returns:
     Transformed boxes of shape [..., N, 7] with the same type as box.
     """
-    # breakpoint()
     transform = pose 
     heading = box[..., -1] + np.arctan2(transform[..., 1, 0], transform[..., 0,
                                                                     0])
@@ -197,7 +222,6 @@ def transform_box(box, pose):
 
     velocity = np.einsum('...ij,...nj->...ni', transform[..., 0:3, 0:3],
                     velocity)[..., [0, 1]] # remove z axis 
-    # breakpoint()
     return np.concatenate([center, box[..., 3:6], velocity, heading[..., np.newaxis]], axis=-1)
 
 def label_to_name(label):
@@ -233,13 +257,13 @@ def convert_detection_to_global_box(detections, infos):
     detection_results = {} # copy.deepcopy(detections)
     gt_results = {}
     for token in tqdm(infos.keys()):
+        if token not in detections.keys():
+            continue
         detection = detections[token]
         detection_results[token] = copy.deepcopy(detection)
         info = infos[token]
-        # pose = get_transform(info)
         anno_path = info['anno_path']
         ref_obj = get_obj(anno_path)
-        # breakpoint()
         pose = np.reshape(ref_obj['veh_to_global'], [4, 4])
         detection_results['pose'] = pose
         # (Pdb) ref_obj['objects'][0].keys()
@@ -248,6 +272,7 @@ def convert_detection_to_global_box(detections, infos):
         labels = detection["label_preds"].detach().clone().cpu().numpy()
         scores = detection['scores'].detach().clone().cpu().numpy()
         # box3d[:, -1] = -box3d[:, -1] - np.pi / 2
+        # tracking_ids = detection['tracking_name']
         box3d[:, [3, 4]] = box3d[:, [4, 3]]
 
         box3d = transform_box(box3d, pose)
@@ -259,15 +284,17 @@ def convert_detection_to_global_box(detections, infos):
         anno_list =[]
         for i in range(num_box):
             anno = {
+                # 'tracking_name': tracking_ids[i],
                 'translation': box3d[i, :3],
                 'velocity': box3d[i, [6, 7]],
+                'size': box3d[i, [3, 4, 5]],
+                'rotation': np.array([0, 0, box3d[i, -1]]),
                 'detection_name': label_to_name(labels[i]),
                 'score': scores[i], 
                 'box_id': i 
             }
 
             anno_list.append(anno)
-
         ret_list.append({
             'token': token, 
             'frame_id':int(frame_id),
